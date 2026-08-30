@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Twilio / Voice configuration
     # ------------------------------------------------------------------
+    #
+    # These are intentionally kept.
+    # We are switching the active outbound provider to Retell,
+    # but there is no reason to delete the existing Twilio credentials
+    # yet.
+    # ------------------------------------------------------------------
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
@@ -65,6 +71,28 @@ class Settings(BaseSettings):
 
     speech_to_text_api_key: str = ""
     text_to_speech_api_key: str = ""
+
+    # ------------------------------------------------------------------
+    # Retell AI configuration
+    # ------------------------------------------------------------------
+    #
+    # RETELL_API_KEY:
+    # Authenticates requests from this backend to Retell.
+    #
+    # RETELL_AGENT_ID:
+    # Identifies the Retell AI agent that handles the conversation.
+    #
+    # RETELL_PHONE_NUMBER:
+    # The Retell-managed phone number used for outbound calls.
+    #
+    # IMPORTANT:
+    # These values are loaded from environment variables.
+    # Never hard-code the actual API key here.
+    # ------------------------------------------------------------------
+
+    retell_api_key: str = ""
+    retell_agent_id: str = ""
+    retell_phone_number: str = ""
 
     # ------------------------------------------------------------------
     # WhatsApp configuration

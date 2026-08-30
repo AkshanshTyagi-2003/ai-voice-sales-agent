@@ -1,8 +1,8 @@
 """
 Call API endpoints.
 
-Creates conversations and starts outbound calls through the
-provider-independent telephony layer.
+Creates conversations and starts outbound calls through
+the Retell AI telephony layer.
 """
 
 from typing import Optional
@@ -17,10 +17,13 @@ from app.storage.repository import (
     conversation_repository,
     lead_repository,
 )
-from app.utils.helpers import generate_id, normalize_phone_number
+from app.utils.helpers import (
+    generate_id,
+    normalize_phone_number,
+)
 from app.voice.telephony import (
+    RetellTelephonyProvider,
     TelephonyClient,
-    TwilioTelephonyProvider,
 )
 
 router = APIRouter(
@@ -47,26 +50,75 @@ class CallResponse(BaseModel):
 
 def get_telephony_client() -> TelephonyClient:
     """
-    Build the real Twilio telephony client.
+    Build the Retell telephony client.
 
-    Twilio credentials are loaded from environment variables
-    through the application settings.
+    Retell credentials are loaded from environment variables.
     """
 
     return TelephonyClient(
-        provider=TwilioTelephonyProvider(
-            account_sid=settings.twilio_account_sid,
-            auth_token=settings.twilio_auth_token,
-            phone_number=settings.twilio_phone_number,
+        provider=RetellTelephonyProvider(
+            api_key=settings.retell_api_key,
+            agent_id=settings.retell_agent_id,
+            phone_number=settings.retell_phone_number,
         )
     )
 
 
-@router.post("/outbound", response_model=CallResponse)
+@router.get("/retell/verify")
+def verify_retell_configuration():
+    """
+    Verify Retell configuration without placing a call.
+
+    This endpoint performs only read-only Retell API requests.
+    It never creates a phone call.
+    """
+
+    try:
+        provider = RetellTelephonyProvider(
+            api_key=settings.retell_api_key,
+            agent_id=settings.retell_agent_id,
+            phone_number=settings.retell_phone_number,
+        )
+
+        verification = provider.verify_configuration()
+
+        return {
+            "success": True,
+            "provider": "retell",
+            "verification": verification,
+            "ready_for_call": verification["ready_for_call"],
+            "call_created": False,
+            "message": (
+                "Retell configuration verified. "
+                "No phone call was created."
+            ),
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "provider": "retell",
+            "ready_for_call": False,
+            "call_created": False,
+            "message": str(exc),
+        }
+
+
+@router.post(
+    "/outbound",
+    response_model=CallResponse,
+)
 def create_outbound_call(
     request: CallRequest,
 ):
-    """Create a conversation and initiate a real outbound call."""
+    """
+    Create a conversation and initiate a real
+    Retell AI outbound call.
+
+    WARNING:
+    Calling this endpoint WILL create a real call
+    and consume Retell/telephony usage.
+    """
 
     phone_number = normalize_phone_number(
         request.phone_number
@@ -85,6 +137,7 @@ def create_outbound_call(
     )
 
     if lead is None:
+
         lead = Lead(
             lead_id=generate_id("lead"),
             phone_number=phone_number,
@@ -109,27 +162,38 @@ def create_outbound_call(
     )
 
     try:
+
         client = get_telephony_client()
 
         result = client.make_outbound_call(
-            conversation_id=conversation.conversation_id,
+            conversation_id=(
+                conversation.conversation_id
+            ),
             phone_number=phone_number,
         )
 
     except Exception as exc:
+
         return CallResponse(
             success=False,
             call_id=None,
-            conversation_id=conversation.conversation_id,
+            conversation_id=(
+                conversation.conversation_id
+            ),
             phone_number=phone_number,
-            message=f"Unable to create Twilio call: {exc}",
+            message=(
+                f"Unable to create Retell call: {exc}"
+            ),
         )
 
     if not result.success:
+
         return CallResponse(
             success=False,
             call_id=result.call_id,
-            conversation_id=conversation.conversation_id,
+            conversation_id=(
+                conversation.conversation_id
+            ),
             phone_number=phone_number,
             message=result.message,
         )
@@ -137,7 +201,9 @@ def create_outbound_call(
     return CallResponse(
         success=True,
         call_id=result.call_id,
-        conversation_id=conversation.conversation_id,
+        conversation_id=(
+            conversation.conversation_id
+        ),
         phone_number=phone_number,
         message=result.message,
     )
@@ -154,6 +220,7 @@ def get_call(
     )
 
     if conversation is None:
+
         raise HTTPException(
             status_code=404,
             detail="Conversation not found.",
