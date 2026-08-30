@@ -10,7 +10,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.core.models import Conversation
+from app.core.config import settings
+from app.core.models import Conversation, Lead
 from app.core.state import state
 from app.storage.repository import (
     conversation_repository,
@@ -18,8 +19,8 @@ from app.storage.repository import (
 )
 from app.utils.helpers import generate_id, normalize_phone_number
 from app.voice.telephony import (
-    MockTelephonyProvider,
     TelephonyClient,
+    TwilioTelephonyProvider,
 )
 
 router = APIRouter(
@@ -46,13 +47,18 @@ class CallResponse(BaseModel):
 
 def get_telephony_client() -> TelephonyClient:
     """
-    Build the telephony client.
+    Build the real Twilio telephony client.
 
-    The mock provider is used until the real provider is connected.
+    Twilio credentials are loaded from environment variables
+    through the application settings.
     """
 
     return TelephonyClient(
-        provider=MockTelephonyProvider()
+        provider=TwilioTelephonyProvider(
+            account_sid=settings.twilio_account_sid,
+            auth_token=settings.twilio_auth_token,
+            phone_number=settings.twilio_phone_number,
+        )
     )
 
 
@@ -60,12 +66,12 @@ def get_telephony_client() -> TelephonyClient:
 def create_outbound_call(
     request: CallRequest,
 ):
-    """Create a conversation and initiate an outbound call."""
+    """Create a conversation and initiate a real outbound call."""
 
     phone_number = normalize_phone_number(
         request.phone_number
         if request.phone_number
-        else ""
+        else settings.target_phone_number
     )
 
     if not phone_number:
@@ -79,8 +85,6 @@ def create_outbound_call(
     )
 
     if lead is None:
-        from app.core.models import Lead
-
         lead = Lead(
             lead_id=generate_id("lead"),
             phone_number=phone_number,
@@ -104,12 +108,22 @@ def create_outbound_call(
         conversation
     )
 
-    client = get_telephony_client()
+    try:
+        client = get_telephony_client()
 
-    result = client.make_outbound_call(
-        conversation_id=conversation.conversation_id,
-        phone_number=phone_number,
-    )
+        result = client.make_outbound_call(
+            conversation_id=conversation.conversation_id,
+            phone_number=phone_number,
+        )
+
+    except Exception as exc:
+        return CallResponse(
+            success=False,
+            call_id=None,
+            conversation_id=conversation.conversation_id,
+            phone_number=phone_number,
+            message=f"Unable to create Twilio call: {exc}",
+        )
 
     if not result.success:
         return CallResponse(

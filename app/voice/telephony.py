@@ -74,14 +74,20 @@ class TwilioTelephonyProvider:
         auth_token: Optional[str] = None,
         phone_number: Optional[str] = None,
     ) -> None:
+
         self.account_sid = (
-            account_sid or settings.twilio_account_sid
+            account_sid
+            or settings.twilio_account_sid
         )
+
         self.auth_token = (
-            auth_token or settings.twilio_auth_token
+            auth_token
+            or settings.twilio_auth_token
         )
+
         self.phone_number = (
-            phone_number or settings.twilio_phone_number
+            phone_number
+            or settings.twilio_phone_number
         )
 
         if not self.account_sid:
@@ -104,11 +110,7 @@ class TwilioTelephonyProvider:
         conversation_id: str,
         phone_number: str,
     ) -> CallResult:
-        """
-        Create a real outbound Twilio call.
-
-        The current implementation uses Twilio's Python SDK.
-        """
+        """Create a real outbound Twilio call."""
 
         try:
             from twilio.rest import Client
@@ -125,13 +127,16 @@ class TwilioTelephonyProvider:
             )
 
             call = client.calls.create(
-                to=self._format_phone_number(phone_number),
+                to=self._format_phone_number(
+                    phone_number
+                ),
                 from_=self._format_phone_number(
                     self.phone_number
                 ),
                 url=self._build_voice_webhook_url(
                     conversation_id
                 ),
+                method="GET",
             )
 
             return CallResult(
@@ -160,7 +165,9 @@ class TwilioTelephonyProvider:
             )
 
     @staticmethod
-    def _format_phone_number(phone_number: str) -> str:
+    def _format_phone_number(
+        phone_number: str,
+    ) -> str:
         """Convert common Indian 10-digit numbers to E.164."""
 
         cleaned = (
@@ -175,7 +182,10 @@ class TwilioTelephonyProvider:
         if cleaned.startswith("+"):
             return cleaned
 
-        if cleaned.startswith("91") and len(cleaned) == 12:
+        if (
+            cleaned.startswith("91")
+            and len(cleaned) == 12
+        ):
             return f"+{cleaned}"
 
         if len(cleaned) == 10:
@@ -188,20 +198,25 @@ class TwilioTelephonyProvider:
         conversation_id: str,
     ) -> str:
         """
-        Build the public webhook URL Twilio calls when the
-        customer answers.
+        Build the public TwiML URL Twilio requests
+        when the customer answers.
         """
 
-        base_url = settings.public_base_url.rstrip("/")
+        base_url = (
+            settings.public_base_url
+            .rstrip("/")
+        )
 
         if not base_url:
             raise ValueError(
-                "PUBLIC_BASE_URL is required for real Twilio calls."
+                "PUBLIC_BASE_URL is required "
+                "for real Twilio calls."
             )
 
         return (
-            f"{base_url}/webhook/voice"
-            f"?conversation_id={conversation_id}"
+            f"{base_url}"
+            f"/webhook/voice/twiml/"
+            f"{conversation_id}"
         )
 
 

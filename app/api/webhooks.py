@@ -2,16 +2,20 @@
 Webhook endpoints for external providers.
 
 Handles:
-- Twilio voice events
+- Twilio voice lifecycle events
 - Twilio speech input
+- Twilio TwiML generation
 - WhatsApp messages
 """
+
+from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.ai.agent import create_sales_agent
+from app.core.config import settings
 from app.core.models import ConversationStatus
 from app.storage.repository import (
     conversation_repository,
@@ -19,7 +23,10 @@ from app.storage.repository import (
 )
 
 
-router = APIRouter(prefix="/webhook", tags=["Webhooks"])
+router = APIRouter(
+    prefix="/webhook",
+    tags=["Webhooks"],
+)
 
 sales_agent = create_sales_agent()
 
@@ -47,8 +54,33 @@ class WhatsAppWebhookRequest(BaseModel):
     language: str = "en"
 
 
+def _public_url(path: str) -> str:
+    """
+    Build an absolute public URL for Twilio callbacks.
+
+    PUBLIC_BASE_URL must point to the publicly reachable Railway
+    deployment when running the real Twilio integration.
+    """
+
+    base_url = settings.public_base_url.strip().rstrip("/")
+
+    if not base_url:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "PUBLIC_BASE_URL is not configured. "
+                "Configure PUBLIC_BASE_URL before using "
+                "the Twilio voice integration."
+            ),
+        )
+
+    return f"{base_url}/{path.lstrip('/')}"
+
+
 @router.post("/voice")
-async def voice_webhook(payload: VoiceEventRequest):
+async def voice_webhook(
+    payload: VoiceEventRequest,
+):
     """
     Handle voice lifecycle events.
 
@@ -56,6 +88,10 @@ async def voice_webhook(payload: VoiceEventRequest):
     - answered
     - completed
     - failed
+
+    This endpoint is kept for application-level lifecycle events.
+    The real Twilio call flow uses the TwiML and speech endpoints
+    below.
     """
 
     conversation = conversation_repository.get(
@@ -77,7 +113,9 @@ async def voice_webhook(payload: VoiceEventRequest):
     elif payload.event == "failed":
         conversation.status = ConversationStatus.FAILED
 
-    conversation_repository.save(conversation)
+    conversation_repository.save(
+        conversation
+    )
 
     return {
         "success": True,
@@ -88,7 +126,9 @@ async def voice_webhook(payload: VoiceEventRequest):
 
 
 @router.post("/voice/speech")
-async def voice_speech_webhook(payload: VoiceSpeechRequest):
+async def voice_speech_webhook(
+    payload: VoiceSpeechRequest,
+):
     """
     Process already-transcribed speech.
 
@@ -106,7 +146,9 @@ async def voice_speech_webhook(payload: VoiceSpeechRequest):
             detail="Conversation not found.",
         )
 
-    lead = lead_repository.get(conversation.lead_id)
+    lead = lead_repository.get(
+        conversation.lead_id
+    )
 
     if lead is None:
         raise HTTPException(
@@ -161,8 +203,9 @@ async def whatsapp_webhook(
             detail="Lead not found.",
         )
 
-    conversation = conversation_repository.get_active_for_lead(
-        lead.lead_id
+    conversation = (
+        conversation_repository
+        .get_active_for_lead(lead.lead_id)
     )
 
     if conversation is None:
@@ -201,6 +244,9 @@ async def twilio_voice_twiml(
 ):
     """
     Return the initial TwiML instructions for a Twilio call.
+
+    Twilio requests this URL when the customer answers the
+    outbound call.
     """
 
     conversation = conversation_repository.get(
@@ -213,17 +259,29 @@ async def twilio_voice_twiml(
             detail="Conversation not found.",
         )
 
+    if conversation.status == ConversationStatus.CREATED:
+        conversation.status = ConversationStatus.ACTIVE
+        conversation_repository.save(conversation)
+
+    speech_url = _public_url(
+        f"/webhook/voice/twilio-speech/{conversation_id}"
+    )
+
+    business_name = escape(
+        settings.business_name
+    )
+
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather
         input="speech"
-        action="/webhook/voice/twilio-speech/{conversation_id}"
+        action="{speech_url}"
         method="POST"
         language="en-IN"
         speechTimeout="auto"
     >
         <Say language="en-IN">
-            Hello, this is the AI sales assistant from ElevateBox.
+            Hello, this is the AI sales assistant from {business_name}.
             How can I help you today?
         </Say>
     </Gather>
@@ -242,13 +300,17 @@ async def twilio_voice_twiml(
     )
 
 
-@router.post("/voice/twilio-speech/{conversation_id}")
+@router.post(
+    "/voice/twilio-speech/{conversation_id}"
+)
 async def twilio_speech_webhook(
     conversation_id: str,
     request: Request,
 ):
     """
-    Receive speech recognition results from Twilio.
+    Receive speech recognition results from Twilio,
+    process them through the sales agent, and return
+    the next TwiML instructions.
     """
 
     conversation = conversation_repository.get(
@@ -261,7 +323,9 @@ async def twilio_speech_webhook(
             detail="Conversation not found.",
         )
 
-    lead = lead_repository.get(conversation.lead_id)
+    lead = lead_repository.get(
+        conversation.lead_id
+    )
 
     if lead is None:
         raise HTTPException(
@@ -269,11 +333,26 @@ async def twilio_speech_webhook(
             detail="Lead not found.",
         )
 
+    if conversation.status == ConversationStatus.CREATED:
+        conversation.status = ConversationStatus.ACTIVE
+
     form = await request.form()
 
     speech_result = str(
         form.get("SpeechResult", "")
     ).strip()
+
+    speech_url = _public_url(
+        f"/webhook/voice/twilio-speech/{conversation_id}"
+    )
+
+    initial_twiml_url = _public_url(
+        f"/webhook/voice/twiml/{conversation_id}"
+    )
+
+    # --------------------------------------------------------------
+    # No speech detected
+    # --------------------------------------------------------------
 
     if not speech_result:
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -283,8 +362,8 @@ async def twilio_speech_webhook(
         Could you please say that again?
     </Say>
 
-    <Redirect method="POST">
-        /webhook/voice/twiml/{conversation_id}
+    <Redirect method="GET">
+        {initial_twiml_url}
     </Redirect>
 </Response>
 """
@@ -293,6 +372,10 @@ async def twilio_speech_webhook(
             content=twiml,
             media_type="application/xml",
         )
+
+    # --------------------------------------------------------------
+    # Process customer speech
+    # --------------------------------------------------------------
 
     result = sales_agent.process_customer_message(
         conversation=conversation,
@@ -304,13 +387,19 @@ async def twilio_speech_webhook(
     lead_repository.save(lead)
     conversation_repository.save(conversation)
 
-    response_text = result.text
+    response_text = escape(
+        str(result.text)
+    )
+
+    # --------------------------------------------------------------
+    # Continue the conversation
+    # --------------------------------------------------------------
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather
         input="speech"
-        action="/webhook/voice/twilio-speech/{conversation_id}"
+        action="{speech_url}"
         method="POST"
         language="en-IN"
         speechTimeout="auto"
