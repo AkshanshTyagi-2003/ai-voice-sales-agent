@@ -96,7 +96,8 @@ class SalesAgent:
         # --------------------------------------------------------------
 
         qualification_update = extract_qualification(
-            customer_message
+            customer_message,
+            existing=lead.qualification,
         )
 
         lead.qualification = merge_qualification(
