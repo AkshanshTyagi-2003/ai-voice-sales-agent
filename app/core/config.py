@@ -55,17 +55,43 @@ class Settings(BaseSettings):
     # Twilio / Voice configuration
     # ------------------------------------------------------------------
     #
-    # These are intentionally kept.
-    # We are switching the active outbound provider to Retell,
-    # but there is no reason to delete the existing Twilio credentials
-    # yet.
+    # Twilio is retained for compatibility and for WhatsApp messaging.
+    #
+    # The active outbound voice provider is Retell.
     # ------------------------------------------------------------------
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
+    twilio_whatsapp_from: str = ""
 
-    # Generic provider fields kept for future provider switching.
+    # ------------------------------------------------------------------
+    # WhatsApp configuration
+    # ------------------------------------------------------------------
+    #
+    # This project uses the existing Twilio credentials for outbound
+    # WhatsApp messages.
+    #
+    # whatsapp_phone_number should contain the Twilio WhatsApp sender.
+    #
+    # Examples:
+    #
+    # WHATSAPP_PHONE_NUMBER=whatsapp:+14155238886
+    #
+    # or:
+    #
+    # WHATSAPP_PHONE_NUMBER=+14155238886
+    #
+    # The webhook sender normalizes it to the whatsapp: format.
+    # ------------------------------------------------------------------
+
+    whatsapp_api_key: str = ""
+    whatsapp_phone_number: str = ""
+
+    # ------------------------------------------------------------------
+    # Generic provider fields
+    # ------------------------------------------------------------------
+
     telephony_api_key: str = ""
     telephony_phone_number: str = ""
 
@@ -79,15 +105,17 @@ class Settings(BaseSettings):
     # RETELL_API_KEY:
     # Authenticates requests from this backend to Retell.
     #
+    # IMPORTANT:
+    # The Retell API key used for webhook verification must be the
+    # API key that has the Retell "webhook" badge.
+    #
     # RETELL_AGENT_ID:
     # Identifies the Retell AI agent that handles the conversation.
     #
     # RETELL_PHONE_NUMBER:
     # The Retell-managed phone number used for outbound calls.
     #
-    # IMPORTANT:
-    # These values are loaded from environment variables.
-    # Never hard-code the actual API key here.
+    # Never hard-code these credentials.
     # ------------------------------------------------------------------
 
     retell_api_key: str = ""
@@ -95,14 +123,14 @@ class Settings(BaseSettings):
     retell_phone_number: str = ""
 
     # ------------------------------------------------------------------
-    # WhatsApp configuration
-    # ------------------------------------------------------------------
-
-    whatsapp_api_key: str = ""
-    whatsapp_phone_number: str = ""
-
-    # ------------------------------------------------------------------
     # Public application URL
+    # ------------------------------------------------------------------
+    #
+    # Example:
+    #
+    # PUBLIC_BASE_URL=https://your-app.up.railway.app
+    #
+    # This is used by external providers to reach the application.
     # ------------------------------------------------------------------
 
     public_base_url: str = ""

@@ -1,3 +1,4 @@
+# main.py
 """
 Application entry point.
 
@@ -12,6 +13,7 @@ from app.api.scheduler import router as scheduler_router
 from app.api.webhooks import router as webhooks_router
 from app.api.whatsapp import router as whatsapp_router
 from app.core.config import settings
+from app.api.retell_webhook import router as retell_webhook_router
 
 
 app = FastAPI(
@@ -44,6 +46,9 @@ app.include_router(
     scheduler_router
 )
 
+app.include_router(
+    retell_webhook_router
+)
 
 @app.get("/")
 def root():

@@ -1,3 +1,4 @@
+# telephony.py
 """
 Telephony provider abstraction.
 
@@ -94,21 +95,20 @@ class RetellTelephonyProvider:
         phone_number: Optional[str] = None,
         agent_id: Optional[str] = None,
     ) -> None:
-
         self.api_key = (
             api_key
             or settings.retell_api_key
-        )
+        ).strip()
 
         self.phone_number = (
             phone_number
             or settings.retell_phone_number
-        )
+        ).strip()
 
         self.agent_id = (
             agent_id
             or settings.retell_agent_id
-        )
+        ).strip()
 
         if not self.api_key:
             raise ValueError(
@@ -152,7 +152,9 @@ class RetellTelephonyProvider:
         body = None
 
         if payload is not None:
-            body = json.dumps(payload).encode("utf-8")
+            body = json.dumps(
+                payload
+            ).encode("utf-8")
 
         request = Request(
             url=url,
@@ -175,7 +177,14 @@ class RetellTelephonyProvider:
                 if not response_body:
                     return {}
 
-                return json.loads(response_body)
+                try:
+                    return json.loads(
+                        response_body
+                    )
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        "Retell returned an invalid JSON response."
+                    ) from exc
 
         except HTTPError as exc:
 
@@ -214,9 +223,12 @@ class RetellTelephonyProvider:
         2. Agent exists
         3. Published agent version exists
         4. Published version belongs to configured agent
-        5. Configured phone number exists
-        6. Phone number matches configuration
-        7. Phone number is a Retell-managed voice number
+        5. Agent channel is voice
+        6. Configured phone number exists
+        7. Phone number matches configuration
+        8. Phone number type
+        9. Phone number country
+        10. Webhook configuration
 
         NO CALL IS CREATED.
         """
@@ -255,15 +267,25 @@ class RetellTelephonyProvider:
 
         # Use the newest published version.
         published_versions.sort(
-            key=lambda item: item.get("version", -1),
+            key=lambda item: (
+                item.get("version", -1)
+            ),
             reverse=True,
         )
 
-        published_version = published_versions[0]
+        published_version = (
+            published_versions[0]
+        )
 
         published_version_number = (
             published_version.get("version")
         )
+
+        if published_version_number is None:
+            raise RuntimeError(
+                "Retell returned a published agent "
+                "version without a version number."
+            )
 
         # --------------------------------------------------------------
         # 2. Get the actual published agent version
@@ -273,7 +295,7 @@ class RetellTelephonyProvider:
             "GET",
             (
                 f"/get-agent/{self.agent_id}"
-                f"?version={published_version_number}"
+                f"?version={quote(str(published_version_number))}"
             ),
         )
 
@@ -293,6 +315,14 @@ class RetellTelephonyProvider:
                 "The selected Retell agent version "
                 "is not published."
             )
+
+        agent_channel = (
+            agent.get("channel")
+        )
+
+        agent_channel_is_voice = (
+            agent_channel == "voice"
+        )
 
         # --------------------------------------------------------------
         # 3. Get all phone numbers
@@ -325,7 +355,9 @@ class RetellTelephonyProvider:
             )
 
         returned_phone_number = (
-            configured_phone.get("phone_number")
+            configured_phone.get(
+                "phone_number"
+            )
         )
 
         phone_matches = (
@@ -333,83 +365,227 @@ class RetellTelephonyProvider:
             == self.phone_number
         )
 
-        phone_type = configured_phone.get(
-            "phone_number_type"
+        phone_type = (
+            configured_phone.get(
+                "phone_number_type"
+            )
         )
 
-        country_code = configured_phone.get(
-            "country_code"
+        country_code = (
+            configured_phone.get(
+                "country_code"
+            )
         )
 
         # --------------------------------------------------------------
-        # 4. Build verification result
+        # 4. Check webhook configuration
+        # --------------------------------------------------------------
+        #
+        # The exact webhook configuration is returned by Retell as
+        # part of the agent configuration. Different Retell versions
+        # may expose it slightly differently, so this check is
+        # intentionally defensive.
+        # --------------------------------------------------------------
+
+        webhook_url = (
+            agent.get("webhook_url")
+        )
+
+        webhook_events = (
+            agent.get("webhook_events")
+            or []
+        )
+
+        if not isinstance(
+            webhook_events,
+            list,
+        ):
+            webhook_events = []
+
+        normalized_webhook_events = [
+            str(event).strip()
+            for event in webhook_events
+            if event is not None
+        ]
+
+        transcript_webhook_enabled = (
+            "transcript_updated"
+            in normalized_webhook_events
+        )
+
+        call_started_webhook_enabled = (
+            "call_started"
+            in normalized_webhook_events
+        )
+
+        call_ended_webhook_enabled = (
+            "call_ended"
+            in normalized_webhook_events
+        )
+
+        call_analyzed_webhook_enabled = (
+            "call_analyzed"
+            in normalized_webhook_events
+        )
+
+        # --------------------------------------------------------------
+        # 5. Build configuration result
         # --------------------------------------------------------------
 
         configuration = {
             "api_key_valid": True,
+
             "agent_exists": True,
+
             "agent_id_matches": (
                 returned_agent_id
                 == self.agent_id
             ),
+
             "published_version_exists": True,
+
             "published_version": (
                 published_version_number
             ),
+
             "agent_is_published": (
-                agent.get("is_published") is True
+                agent.get("is_published")
+                is True
             ),
+
+            "agent_channel": agent_channel,
+
             "agent_channel_is_voice": (
-                agent.get("channel") == "voice"
+                agent_channel_is_voice
             ),
+
             "phone_exists": True,
-            "phone_matches_config": phone_matches,
+
+            "phone_matches_config": (
+                phone_matches
+            ),
+
             "phone_type": phone_type,
+
             "phone_country": country_code,
+
+            "webhook_url": webhook_url,
+
+            "webhook_events": (
+                normalized_webhook_events
+            ),
+
+            "call_started_webhook_enabled": (
+                call_started_webhook_enabled
+            ),
+
+            "transcript_updated_webhook_enabled": (
+                transcript_webhook_enabled
+            ),
+
+            "call_ended_webhook_enabled": (
+                call_ended_webhook_enabled
+            ),
+
+            "call_analyzed_webhook_enabled": (
+                call_analyzed_webhook_enabled
+            ),
         }
+
+        # --------------------------------------------------------------
+        # 6. Determine whether the configuration is ready
+        # --------------------------------------------------------------
 
         ready_for_call = all(
             [
-                configuration["api_key_valid"],
-                configuration["agent_exists"],
-                configuration["agent_id_matches"],
-                configuration["published_version_exists"],
-                configuration["agent_is_published"],
-                configuration["agent_channel_is_voice"],
-                configuration["phone_exists"],
-                configuration["phone_matches_config"],
+                configuration[
+                    "api_key_valid"
+                ],
+
+                configuration[
+                    "agent_exists"
+                ],
+
+                configuration[
+                    "agent_id_matches"
+                ],
+
+                configuration[
+                    "published_version_exists"
+                ],
+
+                configuration[
+                    "agent_is_published"
+                ],
+
+                configuration[
+                    "agent_channel_is_voice"
+                ],
+
+                configuration[
+                    "phone_exists"
+                ],
+
+                configuration[
+                    "phone_matches_config"
+                ],
             ]
         )
+
+        # --------------------------------------------------------------
+        # 7. Return complete read-only verification result
+        # --------------------------------------------------------------
 
         return {
             "retell_api": True,
 
             "agent": {
                 "agent_id": returned_agent_id,
+
                 "agent_name": agent.get(
                     "agent_name"
                 ),
+
                 "channel": agent.get(
                     "channel"
                 ),
+
                 "published": agent.get(
                     "is_published"
                 ),
+
                 "published_version": (
                     published_version_number
                 ),
+
                 "voice_id": agent.get(
                     "voice_id"
                 ),
+
                 "language": agent.get(
                     "language"
+                ),
+
+                "webhook_url": webhook_url,
+
+                "webhook_events": (
+                    normalized_webhook_events
                 ),
             },
 
             "phone_number": {
-                "phone_number": returned_phone_number,
-                "phone_number_type": phone_type,
-                "country_code": country_code,
+                "phone_number": (
+                    returned_phone_number
+                ),
+
+                "phone_number_type": (
+                    phone_type
+                ),
+
+                "country_code": (
+                    country_code
+                ),
+
                 "phone_number_pretty": (
                     configured_phone.get(
                         "phone_number_pretty"
@@ -419,11 +595,15 @@ class RetellTelephonyProvider:
 
             "configuration": configuration,
 
-            # This is deliberately ALWAYS false here.
-            # verify_configuration() never creates calls.
+            # Deliberately ALWAYS false.
+            #
+            # verify_configuration() only performs GET
+            # requests. It NEVER creates a phone call.
             "call_created": False,
 
-            "ready_for_call": ready_for_call,
+            "ready_for_call": (
+                ready_for_call
+            ),
 
             "message": (
                 "Retell configuration verified "
@@ -450,24 +630,61 @@ class RetellTelephonyProvider:
         It is intentionally separate from verification.
         """
 
+        if not conversation_id:
+            return CallResult(
+                success=False,
+                call_id=None,
+                status=ConversationStatus.CREATED,
+                message=(
+                    "Conversation ID is required."
+                ),
+            )
+
         if not phone_number:
             return CallResult(
                 success=False,
                 call_id=None,
                 status=ConversationStatus.CREATED,
-                message="Phone number is required.",
+                message=(
+                    "Phone number is required."
+                ),
+            )
+
+        formatted_phone_number = (
+            self._format_phone_number(
+                phone_number
+            )
+        )
+
+        if not formatted_phone_number:
+            return CallResult(
+                success=False,
+                call_id=None,
+                status=ConversationStatus.CREATED,
+                message=(
+                    "Invalid phone number."
+                ),
             )
 
         try:
 
             payload = {
-                "from_number": self.phone_number,
-                "to_number": self._format_phone_number(
-                    phone_number
+                "from_number": (
+                    self.phone_number
                 ),
-                "override_agent_id": self.agent_id,
+
+                "to_number": (
+                    formatted_phone_number
+                ),
+
+                "override_agent_id": (
+                    self.agent_id
+                ),
+
                 "metadata": {
-                    "conversation_id": conversation_id,
+                    "conversation_id": (
+                        conversation_id
+                    ),
                 },
             }
 
@@ -477,11 +694,27 @@ class RetellTelephonyProvider:
                 payload,
             )
 
+            call_id = response.get(
+                "call_id"
+            )
+
+            if not call_id:
+                return CallResult(
+                    success=False,
+                    call_id=None,
+                    status=(
+                        ConversationStatus.CREATED
+                    ),
+                    message=(
+                        "Retell accepted the request "
+                        "but did not return a call ID."
+                    ),
+                    raw_response=response,
+                )
+
             return CallResult(
                 success=True,
-                call_id=response.get(
-                    "call_id"
-                ),
+                call_id=call_id,
                 status=ConversationStatus.RINGING,
                 message=(
                     "Retell AI call created successfully."
@@ -499,8 +732,12 @@ class RetellTelephonyProvider:
                     f"Retell call failed: {exc}"
                 ),
                 raw_response={
-                    "conversation_id": conversation_id,
-                    "phone_number": phone_number,
+                    "conversation_id": (
+                        conversation_id
+                    ),
+                    "phone_number": (
+                        formatted_phone_number
+                    ),
                 },
             )
 
@@ -509,17 +746,31 @@ class RetellTelephonyProvider:
         phone_number: str,
     ) -> str:
         """
-        Convert common Indian 10-digit numbers to E.164.
+        Convert common Indian phone numbers to E.164.
+
+        Examples:
+
+        9536216821
+            -> +919536216821
+
+        919536216821
+            -> +919536216821
+
+        +919536216821
+            -> +919536216821
         """
 
         cleaned = (
-            phone_number
+            str(phone_number or "")
             .strip()
             .replace(" ", "")
             .replace("-", "")
             .replace("(", "")
             .replace(")", "")
         )
+
+        if not cleaned:
+            return ""
 
         if cleaned.startswith("+"):
             return cleaned
@@ -553,23 +804,29 @@ class TwilioTelephonyProvider:
         self.account_sid = (
             account_sid
             or settings.twilio_account_sid
-        )
+        ).strip()
 
         self.auth_token = (
             auth_token
             or settings.twilio_auth_token
-        )
+        ).strip()
 
         self.phone_number = (
             phone_number
             or settings.twilio_phone_number
-        )
+        ).strip()
 
     def make_call(
         self,
         conversation_id: str,
         phone_number: str,
     ) -> CallResult:
+        """
+        Twilio is retained only for backward compatibility.
+
+        The application no longer creates outbound voice calls
+        through Twilio.
+        """
 
         return CallResult(
             success=False,
@@ -596,14 +853,28 @@ class TelephonyClient:
         conversation_id: str,
         phone_number: str,
     ) -> CallResult:
-        """Create an outbound call through the configured provider."""
+        """
+        Create an outbound call through the configured provider.
+        """
+
+        if not conversation_id:
+            return CallResult(
+                success=False,
+                call_id=None,
+                status=ConversationStatus.CREATED,
+                message=(
+                    "Conversation ID is required."
+                ),
+            )
 
         if not phone_number:
             return CallResult(
                 success=False,
                 call_id=None,
                 status=ConversationStatus.CREATED,
-                message="Phone number is required.",
+                message=(
+                    "Phone number is required."
+                ),
             )
 
         return self.provider.make_call(
