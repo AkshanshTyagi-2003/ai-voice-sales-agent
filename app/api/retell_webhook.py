@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request as FastAPIRequest
 
+from app.actions.callback import CallbackManager, detect_callback_request
 from app.actions.whatsapp import (
     WhatsAppClient,
     build_final_followup_message,
@@ -253,6 +254,7 @@ def _process_new_user_turns(
         }
 
     high_intent = False
+    callback_result = None
     for customer_message in new_turns:
         result = sales_agent.process_customer_message(
             conversation=conversation,
@@ -269,12 +271,39 @@ def _process_new_user_turns(
         if getattr(result.intent, "high_intent", False):
             high_intent = True
 
+        # Requirement #7/#8: "If I say call me back tomorrow morning,
+        # your system understands it and books the callback itself."
+        # This previously only existed as a manual POST
+        # /scheduler/callback endpoint -- nothing on the live-call path
+        # ever looked at what the customer actually said and booked a
+        # callback from it. Fire this at most once per conversation.
+        if not conversation.callback_requested:
+            requested_time_text = detect_callback_request(customer_message)
+            if requested_time_text:
+                callback_result = CallbackManager().request_callback(
+                    lead=lead,
+                    requested_time_text=requested_time_text,
+                )
+                if callback_result.success:
+                    conversation.callback_requested = True
+
     lead_repository.save(lead)
     conversation_repository.save(conversation)
 
     return {
         "processed": len(new_turns),
         "high_intent": high_intent,
+        "callback_booked": bool(
+            callback_result is not None and callback_result.success
+        ),
+        "callback_scheduled_for": (
+            callback_result.callback.scheduled_for.isoformat()
+            if callback_result
+            and callback_result.success
+            and callback_result.callback
+            and callback_result.callback.scheduled_for
+            else None
+        ),
     }
 
 
@@ -475,6 +504,8 @@ async def retell_webhook(
                 lead.temperature.value if lead.temperature else None
             ),
             "whatsapp": whatsapp_result,
+            "callback_booked": processing_result["callback_booked"],
+            "callback_scheduled_for": processing_result["callback_scheduled_for"],
         }
 
     # ==================================================================

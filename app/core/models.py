@@ -125,6 +125,7 @@ class Conversation(BaseModel):
     ended_at: Optional[datetime] = None
 
     whatsapp_sent_mid_call: bool = False
+    whatsapp_sent_final: bool = False
     callback_requested: bool = False
 
 

@@ -66,6 +66,31 @@ class Settings(BaseSettings):
     twilio_whatsapp_from: str = ""
 
     # ------------------------------------------------------------------
+    # WhatsApp configuration (Vonage Messages API Sandbox)
+    # ------------------------------------------------------------------
+    #
+    # Switched from Twilio to Vonage's Messages API Sandbox
+    # (https://developer.vonage.com/en/messages/concepts/messages-api-sandbox)
+    # because Twilio's trial account could not deliver messages.
+    #
+    # IMPORTANT: the Vonage Sandbox has the exact same opt-in
+    # restriction Twilio's sandbox has -- any "to" number (including
+    # your own) must first send the join keyword shown on your Vonage
+    # dashboard (Messages API Sandbox page) to VONAGE_WHATSAPP_FROM
+    # from that number's real WhatsApp app, once, before Vonage is
+    # allowed to message it back. If sends keep failing, check that
+    # opt-in first -- it is the most common cause, not a code bug.
+    #
+    # vonage_whatsapp_from should be digits only, no leading + (e.g.
+    # 14157386102), matching how Vonage's docs format sender/recipient
+    # numbers.
+    # ------------------------------------------------------------------
+
+    vonage_api_key: str = ""
+    vonage_api_secret: str = ""
+    vonage_whatsapp_from: str = ""
+
+    # ------------------------------------------------------------------
     # WhatsApp configuration
     # ------------------------------------------------------------------
     #
@@ -154,6 +179,15 @@ class Settings(BaseSettings):
 
     resume_path: str = "assets/resume.pdf"
     architecture_image_path: str = "assets/architecture.png"
+
+    # Twilio's WhatsApp media API requires publicly reachable HTTPS
+    # URLs -- it cannot fetch files from local disk. Host resume_path /
+    # architecture_image_path (e.g. under a static route on
+    # public_base_url, or a cloud bucket) and put the resulting public
+    # URLs here so the final follow-up WhatsApp can actually attach
+    # them. Without these set, the follow-up still sends as text-only.
+    resume_media_url: str = ""
+    architecture_image_url: str = ""
 
     # ------------------------------------------------------------------
     # Environment loading
