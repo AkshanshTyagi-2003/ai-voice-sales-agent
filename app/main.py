@@ -6,6 +6,7 @@ Creates the FastAPI application and registers all API routers.
 """
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.calls import router as calls_router
 from app.api.health import router as health_router
@@ -25,6 +26,11 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.mount(
+    "/assets",
+    StaticFiles(directory="assets"),
+    name="assets",
+)
 
 app.include_router(
     health_router

@@ -1,3 +1,4 @@
+# retell_webhook.py
 """
 Retell webhook integration.
 
@@ -14,7 +15,8 @@ Important:
 - transcript_updated is used for MID-CALL intent detection.
 - HOT leads can trigger WhatsApp while the call is still active.
 - call_ended / call_analyzed send the post-call follow-up (resume +
-  architecture image as media), exactly once, via
+  architecture image as media, for HOT/WARM/COLD leads -- see
+  _send_final_followup_whatsapp), exactly once, via
   app.actions.whatsapp.build_final_followup_message.
 - This endpoint never creates a Retell call.
 - Webhook signatures are verified using Retell's documented
@@ -26,7 +28,24 @@ _get_whatsapp_from_number, _format_phone_number, and the message body
 builder) used to live here as a duplicate of app/actions/whatsapp.py.
 That duplicate is gone -- this file now imports WhatsAppClient and both
 message builders from app.actions.whatsapp, which is the single place
-Twilio is called from.
+Vonage is called from.
+
+CHANGE (WhatsApp content/media fix): _send_final_followup_whatsapp now
+resolves the actual architecture/resume media (via
+app.actions.whatsapp.resolve_final_followup_media) and attaches it for
+the final follow-up regardless of lead temperature (HOT, WARM, and
+COLD all now get the architecture image + resume in the final
+follow-up, per the assignment's "final WhatsApp must include the
+contact number, architecture image and resume" requirement -- media is
+still never attached mid-call), passing explicit Vonage message types
+("image"/"file") since the assignment's Google Drive share links carry
+no file extension for WhatsAppClient to auto-guess from. It also tells
+build_final_followup_message exactly what was actually attached (so
+the message body can never claim a resume/architecture was sent when
+it wasn't) and passes the conversation through so the message can
+acknowledge a requested callback. See app/actions/whatsapp.py for the
+full explanation of each fix.
+
 """
 import hashlib
 import hmac
@@ -42,11 +61,13 @@ from app.actions.whatsapp import (
     WhatsAppClient,
     build_final_followup_message,
     build_mid_call_message,
+    resolve_final_followup_media,
 )
 from app.ai.agent import create_sales_agent
 from app.core.config import settings
 from app.core.models import ConversationStatus, MessageRole
 from app.storage.repository import conversation_repository, lead_repository
+from app.utils.helpers import detect_language
 
 router = APIRouter(
     prefix="/webhook",
@@ -251,11 +272,28 @@ def _process_new_user_turns(
         return {
             "processed": 0,
             "high_intent": bool(lead.intent_score >= 0.70),
+            "callback_booked": False,
+            "callback_scheduled_for": None,
         }
 
     high_intent = False
     callback_result = None
     for customer_message in new_turns:
+        # EXTENSION (multilingual support): update the lead's recorded
+        # language from this turn before processing it, so downstream
+        # WhatsApp copy (app.actions.whatsapp) follows whichever
+        # language the customer is CURRENTLY speaking -- per doc2
+        # section 1 ("If the customer switches language: follow the
+        # customer's current language preference naturally... Do NOT
+        # repeatedly ask"). detect_language() returns None for
+        # ambiguous turns (a bare "yes", a number, a name), in which
+        # case we deliberately keep whatever language was already
+        # recorded rather than overwrite it.
+        detected_language = detect_language(customer_message)
+        if detected_language is not None:
+            lead.language = detected_language
+            conversation.language = detected_language
+
         result = sales_agent.process_customer_message(
             conversation=conversation,
             lead=lead,
@@ -314,19 +352,38 @@ def _send_mid_call_whatsapp(lead, conversation) -> Dict[str, Any]:
     """
     Send the HOT-lead WhatsApp exactly once.
 
-    The conversation flag prevents duplicate sends when Retell sends
-    multiple transcript_updated events or retries a webhook.
+    In development, this is a dry run: the exact message that would be
+    sent is returned without contacting Vonage.
+
+    In production, the existing Vonage sending behavior is unchanged.
+
+    UNCHANGED: mid-call WhatsApp remains HOT-only and text-only (no
+    architecture/resume media mid-call -- that stays a final-follow-up
+    only behavior, see _send_final_followup_whatsapp).
     """
     if conversation.whatsapp_sent_mid_call:
         return {"sent": False, "reason": "already_sent"}
+
+    message = build_mid_call_message(lead)
+
+    # Local development safety: show exactly what would be sent,
+    # but never contact Vonage.
+    if settings.environment != "production":
+        return {
+            "sent": False,
+            "dry_run": True,
+            "message": message,
+        }
 
     try:
         client = WhatsAppClient()
     except ValueError as exc:
         return {"sent": False, "error": str(exc)}
 
-    message = build_mid_call_message(lead)
-    result = client.send_text(to_number=lead.phone_number, body=message)
+    result = client.send_text(
+        to_number=lead.phone_number,
+        body=message,
+    )
 
     if result.success:
         conversation.whatsapp_sent_mid_call = True
@@ -338,43 +395,84 @@ def _send_mid_call_whatsapp(lead, conversation) -> Dict[str, Any]:
 
 def _send_final_followup_whatsapp(lead, conversation) -> Dict[str, Any]:
     """
-    Send the post-call follow-up WhatsApp exactly once, with the resume
-    and architecture-overview image attached as media.
+    Send the post-call follow-up WhatsApp exactly once.
 
-    NOTE: this reads conversation.whatsapp_sent_final and lead's resume /
-    architecture-image URLs. Both need to exist for this to compile and
-    run against the real models -- see the note at the bottom of this
-    response about the two small additions still needed in
-    app/core/models.py (a `whatsapp_sent_final` flag on Conversation) and
-    app/core/config.py (RESUME_MEDIA_URL / ARCHITECTURE_IMAGE_URL
-    settings), since neither existed in the files you pasted.
+    In development, this is a dry run: the exact final message and
+    the media that would actually be attached are returned without
+    contacting Vonage.
+
+    In production, the existing Vonage sending behavior is unchanged.
+
+    CHANGE (assignment requirement): the architecture overview PNG and
+    resume PDF are now resolved and attached for the final follow-up
+    regardless of lead temperature -- HOT, WARM, and COLD all get both
+    attachments in the final WhatsApp (previously this was gated to
+    HOT leads only). This does not affect the mid-call WhatsApp, which
+    remains HOT-only and text-only via _send_mid_call_whatsapp above.
+    build_final_followup_message is still told exactly what was
+    actually attached (has_architecture_media / has_resume_media) so
+    the message body can never claim an attachment that wasn't sent
+    (doc2 Problem 2), and the conversation is still passed through so
+    the message can acknowledge a requested callback.
     """
     if getattr(conversation, "whatsapp_sent_final", False):
         return {"sent": False, "reason": "already_sent"}
+
+    media_urls: List[str] = []
+    media_types: List[str] = []
+    has_architecture_media = False
+    has_resume_media = False
+
+    media = resolve_final_followup_media()
+    architecture_url = (media.get("architecture_url") or "").strip()
+    resume_url = (media.get("resume_url") or "").strip()
+
+    if architecture_url:
+        media_urls.append(architecture_url)
+        media_types.append("image")  # architecture overview is PNG
+        has_architecture_media = True
+
+    if resume_url:
+        media_urls.append(resume_url)
+        media_types.append("file")  # resume is PDF
+        has_resume_media = True
+
+    message = build_final_followup_message(
+        lead,
+        conversation=conversation,
+        has_architecture_media=has_architecture_media,
+        has_resume_media=has_resume_media,
+    )
+
+    # Local development safety: show exactly what would be sent,
+    # but never contact Vonage.
+    if settings.environment != "production":
+        return {
+            "sent": False,
+            "dry_run": True,
+            "message": message,
+            "media_urls": media_urls,
+        }
 
     try:
         client = WhatsAppClient()
     except ValueError as exc:
         return {"sent": False, "error": str(exc)}
 
-    resume_url = (getattr(settings, "resume_media_url", "") or "").strip()
-    architecture_url = (
-        getattr(settings, "architecture_image_url", "") or ""
-    ).strip()
-    media_urls = [url for url in (resume_url, architecture_url) if url]
-
-    message = build_final_followup_message(lead)
-
     if media_urls:
         result = client.send_media(
             to_number=lead.phone_number,
             body=message,
             media_urls=media_urls,
+            media_types=media_types,
         )
     else:
-        # Media URLs aren't configured -- still send the text follow-up
-        # rather than silently dropping it.
-        result = client.send_text(to_number=lead.phone_number, body=message)
+        # Media URLs aren't attached for this lead -- still send the
+        # text follow-up.
+        result = client.send_text(
+            to_number=lead.phone_number,
+            body=message,
+        )
 
     if result.success:
         conversation.whatsapp_sent_final = True
@@ -485,7 +583,8 @@ async def retell_webhook(
         whatsapp_result = {"sent": False, "reason": "not_high_intent"}
 
         if (
-            lead.intent_score >= 0.70
+            lead.temperature is not None
+            
             and not conversation.whatsapp_sent_mid_call
         ):
             whatsapp_result = _send_mid_call_whatsapp(

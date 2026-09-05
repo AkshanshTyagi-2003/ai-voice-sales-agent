@@ -1,3 +1,4 @@
+# repository.py
 """
 Persistent repository layer.
 
@@ -261,10 +262,11 @@ class ConversationRepository:
                     started_at,
                     ended_at,
                     whatsapp_sent_mid_call,
+                    whatsapp_sent_final,
                     callback_requested,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation.conversation_id,
@@ -280,6 +282,15 @@ class ConversationRepository:
                     ),
                     int(
                         conversation.whatsapp_sent_mid_call
+                    ),
+                    int(
+                        # EXTENSION: this flag existed on the model but was
+                        # never persisted (missing from both the schema and
+                        # this INSERT) -- see app/storage/database.py for
+                        # the migration. Without this, a retried
+                        # call_ended/call_analyzed webhook could re-send
+                        # the post-call follow-up WhatsApp on every retry.
+                        conversation.whatsapp_sent_final
                     ),
                     int(
                         conversation.callback_requested
@@ -441,6 +452,9 @@ class ConversationRepository:
             ),
             whatsapp_sent_mid_call=bool(
                 row["whatsapp_sent_mid_call"]
+            ),
+            whatsapp_sent_final=bool(
+                row["whatsapp_sent_final"]
             ),
             callback_requested=bool(
                 row["callback_requested"]

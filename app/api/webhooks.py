@@ -231,7 +231,7 @@ async def voice_speech_webhook(
             if lead.temperature
             else None
         ),
-        "high_intent": result.high_intent,
+        "high_intent": result.intent.high_intent,
     }
 
 

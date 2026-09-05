@@ -4,6 +4,17 @@ AI sales-agent orchestration.
 
 Coordinates conversation context, qualification, intent analysis,
 classification, and response generation.
+
+CHANGE (Hindi agent response fix): RuleBasedProvider.generate() used to
+ignore language entirely and always return the same hardcoded English
+sentence, even when the conversation's detected language was Hindi
+("hi"). AIProvider.generate() and RuleBasedProvider.generate() now
+accept an optional `language` parameter, and SalesAgent.
+process_customer_message() passes its existing `language` argument
+through to the provider. RuleBasedProvider returns a Hindi response
+when language == "hi"; every other language (including the existing
+"en" default and "hinglish") falls through to the exact same English
+sentence as before, so English conversations are unchanged.
 """
 
 from typing import List, Optional, Protocol
@@ -34,7 +45,7 @@ class AIProvider(Protocol):
     A future provider only needs to implement generate().
     """
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, language: str = "en") -> str:
         ...
 
 
@@ -46,8 +57,22 @@ class RuleBasedProvider:
     specific LLM provider is connected.
     """
 
-    def generate(self, prompt: str) -> str:
-        """Generate a basic conversational response."""
+    def generate(self, prompt: str, language: str = "en") -> str:
+        """Generate a basic conversational response.
+
+        CHANGE: previously this always returned the English sentence
+        below regardless of `language`. It now returns a Hindi
+        response when language == "hi"; every other value (including
+        "en" and "hinglish") keeps the original English sentence
+        unchanged.
+        """
+
+        if language == "hi":
+            return (
+                "बिल्कुल, मैं इसमें आपकी मदद कर सकता हूँ। "
+                "आप किस तरह की वेबसाइट बनवाना चाहते हैं, "
+                "उसके बारे में थोड़ा बताइए।"
+            )
 
         return (
             "Sure, I can help with that. "
@@ -153,7 +178,8 @@ class SalesAgent:
         # --------------------------------------------------------------
 
         response_text = self.provider.generate(
-            prompt
+            prompt,
+            language=language,
         )
 
         # --------------------------------------------------------------

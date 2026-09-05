@@ -86,6 +86,7 @@ class Database:
                     started_at TEXT,
                     ended_at TEXT,
                     whatsapp_sent_mid_call INTEGER DEFAULT 0,
+                    whatsapp_sent_final INTEGER DEFAULT 0,
                     callback_requested INTEGER DEFAULT 0,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (lead_id)
@@ -93,6 +94,28 @@ class Database:
                 )
                 """
             )
+
+            # EXTENSION (post-call follow-up idempotency): whatsapp_sent_final
+            # already existed on the Conversation model (app/core/models.py)
+            # but was never part of this schema, so it was silently dropped
+            # on every save/load -- meaning the post-call WhatsApp idempotency
+            # flag never actually persisted, and a retried call_ended /
+            # call_analyzed webhook (Retell can send both, and can retry
+            # either) could re-send the final follow-up. CREATE TABLE IF NOT
+            # EXISTS above only affects brand-new databases, so an
+            # ALTER TABLE migration is required for the existing
+            # data/ai_voice_sales_agent.db file. SQLite has no
+            # "ADD COLUMN IF NOT EXISTS", so this just tries the ALTER and
+            # ignores the "duplicate column" error on databases that already
+            # have it (e.g. freshly created ones, or a second startup).
+            try:
+                connection.execute(
+                    "ALTER TABLE conversations "
+                    "ADD COLUMN whatsapp_sent_final INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
             connection.execute(
                 """

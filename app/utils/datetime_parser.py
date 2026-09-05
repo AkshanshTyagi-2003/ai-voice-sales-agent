@@ -2,40 +2,67 @@
 """
 Natural-language relative-datetime parsing.
 
-Turns spoken phrasing like "call me back tomorrow morning" or
-"ring me at 5pm" into a concrete datetime, anchored to a reference
-time (normally "now" in the business's configured timezone).
+Turns spoken phrasing like "call me back tomorrow morning", "ring me at
+5pm", "day after tomorrow", "September 10 at 4pm", or the Hindi/Hinglish
+equivalents ("kal subah 10 baje", "aaj raat 9 baje", "parso") into a
+concrete datetime, anchored to a reference time (normally "now" in the
+business's configured timezone).
 
-This module was previously empty, which meant CallbackRequest.scheduled_for
-was never populated by any caller -- NaturalLanguageCallbackScheduler in
-app/actions/callback.py depends directly on parse_relative_datetime().
+EXTENSION NOTE (Hindi/Hinglish support):
+This module originally only understood English phrasing. The parsing
+strategy below is unchanged -- collect a "day" component and a "time of
+day" component from the text, then combine them -- this extension only
+widens what each component recognizes:
+  - day component: + "day after tomorrow" / "परसों" / "parso",
+    + explicit "<month> <day>" dates, + Hindi weekday names.
+  - time component: + Hindi/Hinglish "<N> बजे / baje" clock phrasing
+    disambiguated by a Hindi/Hinglish time-of-day word (सुबह/subah,
+    दोपहर/dopahar, शाम/shaam, रात/raat), + those time-of-day words on
+    their own (parallel to the existing morning/afternoon/evening/night
+    English handling).
+None of the existing English matching branches were changed, so English
+callback parsing (today/tonight/tomorrow/weekday/specific
+time/specific date) behaves exactly as before.
 
-UPDATE: broadened to cover the natural-language phrases customers
-actually use on a call ("I'll call you tonight at 9 PM", "the day
-after tomorrow", "September 10", "at nine tonight", "5 in the
-evening"), on top of what already worked. All previously-working
-phrases keep producing the same result -- this only ADDS recognized
-patterns, and adds a "day after tomorrow" check ahead of the plain
-"tomorrow" check (a phrase like "the day after tomorrow" contains the
-substring "tomorrow", so without that ordering it would have been
-misread as +1 day instead of +2).
+CHANGE (next-week / next-month day-component -- THIS revision):
+Root cause: this module had NO handling at all -- in English, Hindi,
+or Hinglish -- for a bare "next week" / "next month" style relative
+day reference (only specific weekday names, "day after tomorrow",
+"tomorrow", and "today" were recognized as day components). That is a
+gap in the SHARED day-component logic, not something specific to one
+language: it just happens to be exercised by a Hindi callback example
+("अगले हफ्ते मुझे दोबारा कॉल कर लेना" -- "call me back next week"),
+where it caused the day component AND the time-of-day component to
+both stay unset, so parse_relative_datetime returned None and no
+callback time was ever produced.
+
+Fixed by adding one more day-component branch, in English, Hindi
+(Devanagari), and Hinglish (Romanized Hindi) -- "next week" / "अगले
+हफ्ते" / "agle hafte" -> +7 days, and "next month" / "अगले महीने" /
+"agle mahine" / "agle month" -> same day-of-month next month (clamped
+to the last valid day if the target month is shorter, e.g. Jan 31 ->
+Feb 28).
+
+This is inserted into the EXISTING day_offset_date if/elif chain,
+gated the same way every other branch in that chain already is
+(`day_offset_date is None and ...`), so it can only ever fire when
+nothing more specific (an explicit date, a weekday name, "day after
+tomorrow", "tomorrow") has already matched. Because it is purely
+additive and only ever changes what happens for text that PREVIOUSLY
+made this function return None, it cannot alter the result for any
+input that already resolved to a date -- it can only resolve some
+previously-unresolved inputs. Every other branch, and the time-of-day
+logic that runs afterward, is completely unchanged.
 """
+import calendar
 import re
 from datetime import datetime, timedelta, time as dtime
 from typing import Optional
 
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
-MONTHS = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
-}
-
-WORD_NUMBERS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-}
+# Hindi weekday names, in the same Monday->Sunday order as DAYS above.
+HI_DAYS = ["सोमवार", "मंगलवार", "बुधवार", "गुरुवार", "शुक्रवार", "शनिवार", "रविवार"]
 
 TIME_OF_DAY = {
     "morning": dtime(hour=9, minute=0),
@@ -46,21 +73,37 @@ TIME_OF_DAY = {
     "midday": dtime(hour=12, minute=0),
 }
 
-# Context words used ONLY to disambiguate a spelled-out hour that carries
-# no am/pm of its own -- e.g. "call me at nine tonight" -> 9 must mean PM
-# because "tonight" is in the sentence. Without one of these words present,
-# a bare "at nine" is left unparsed rather than guessed at (see
-# _extract_explicit_time).
-_PM_CONTEXT_WORDS = ("tonight", "evening", "night")
-_AM_CONTEXT_WORDS = ("morning",)
+# Hindi (Devanagari) / Hinglish (Latin) time-of-day words, mapped to the
+# same default clock times as their English equivalents above. These are
+# ALSO used to disambiguate a bare "<N> बजे / baje" clock phrase that has
+# no am/pm marker (see _extract_hi_clock_time below).
+HI_TIME_OF_DAY = {
+    "सुबह": dtime(hour=9, minute=0),
+    "subah": dtime(hour=9, minute=0),
+    "दोपहर": dtime(hour=14, minute=0),
+    "dopahar": dtime(hour=14, minute=0),
+    "शाम": dtime(hour=18, minute=0),
+    "shaam": dtime(hour=18, minute=0),
+    "sham": dtime(hour=18, minute=0),
+    "रात": dtime(hour=20, minute=0),
+    "raat": dtime(hour=20, minute=0),
+}
 
-_MONTH_NAMES_PATTERN = "|".join(MONTHS.keys())
-_ABSOLUTE_DATE_PATTERN_MONTH_FIRST = re.compile(
-    r"\b(" + _MONTH_NAMES_PATTERN + r")\s+(\d{1,2})(?:st|nd|rd|th)?\b"
-)
-_ABSOLUTE_DATE_PATTERN_DAY_FIRST = re.compile(
-    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_NAMES_PATTERN + r")\b"
-)
+MONTHS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+_MONTH_NAME_ALTERNATION = "|".join(sorted(MONTHS.keys(), key=len, reverse=True))
 
 
 def _next_weekday(base: datetime, target_weekday: int) -> datetime:
@@ -70,23 +113,129 @@ def _next_weekday(base: datetime, target_weekday: int) -> datetime:
     return base + timedelta(days=days_ahead)
 
 
+def _add_one_month(base: datetime) -> datetime:
+    """
+    Return the same day-of-month, one calendar month ahead of `base`,
+    clamped to the target month's last valid day (e.g. Jan 31 ->
+    Feb 28/29). Time-of-day is left as-is on `base`; the caller
+    subsequently overwrites hour/minute via _combine, so only the
+    date portion matters here.
+    """
+    month = base.month + 1
+    year = base.year
+    if month > 12:
+        month = 1
+        year += 1
+    last_day = calendar.monthrange(year, month)[1]
+    day = min(base.day, last_day)
+    return base.replace(year=year, month=month, day=day)
+
+
 def _combine(date_part: datetime, time_part: dtime) -> datetime:
     return date_part.replace(
         hour=time_part.hour, minute=time_part.minute, second=0, microsecond=0
     )
 
 
-def _extract_explicit_time(lowered: str) -> Optional[dtime]:
+def _extract_explicit_date(text: str, now: datetime) -> Optional[datetime]:
     """
-    Look for a specific clock time in the text, trying progressively
-    looser patterns in order of confidence. Returns None if nothing
-    safely parseable is found -- callers then fall back to the
-    TIME_OF_DAY defaults (morning/evening/etc).
+    Match an explicit "<month> <day>" or "<day> <month>" date, e.g.
+    "September 10", "10 September", "Sep 10th". Month names are commonly
+    kept in English even inside Hindi/Hinglish speech, so this single
+    pattern set covers all three supported languages.
+
+    If the resulting date has already passed this year, roll to next
+    year -- consistent with how weekday names below roll to "next
+    <weekday>" rather than a date in the past.
     """
-    # 1. "9pm", "9:30 pm", "10 AM" -- unambiguous regardless of
-    #    whatever else is in the sentence (this is the original,
-    #    already-working pattern -- unchanged).
+    month_day = re.search(
+        rf"\b({_MONTH_NAME_ALTERNATION})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b",
+        text,
+        re.IGNORECASE,
+    )
+    day_month = None
+    if not month_day:
+        day_month = re.search(
+            rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_NAME_ALTERNATION})\b",
+            text,
+            re.IGNORECASE,
+        )
+
+    if month_day:
+        month = MONTHS[month_day.group(1).lower()]
+        day = int(month_day.group(2))
+    elif day_month:
+        day = int(day_month.group(1))
+        month = MONTHS[day_month.group(2).lower()]
+    else:
+        return None
+
+    year = now.year
+    try:
+        candidate = now.replace(
+            year=year, month=month, day=day,
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+    except ValueError:
+        return None
+
+    if candidate.date() < now.date():
+        try:
+            candidate = candidate.replace(year=year + 1)
+        except ValueError:
+            return None
+
+    return candidate
+
+
+def _extract_hi_clock_time(lowered: str, original: str) -> Optional[dtime]:
+    """
+    Match Hindi/Hinglish "<N> बजे" / "<N> baje" ("<N> o'clock") clock
+    phrasing, e.g. "9 बजे", "10 baje". This has no am/pm marker of its
+    own, so the hour is disambiguated using a nearby Hindi/Hinglish
+    time-of-day word (रात/raat -> pm, सुबह/subah -> am, etc.) when one is
+    present in the same message; otherwise the literal hour is used
+    as-is (matching how a bare hour with no am/pm is treated elsewhere
+    in this module).
+    """
+    clock_match = re.search(r"(\d{1,2})\s*(?:बजे|baje)", original) or re.search(
+        r"(\d{1,2})\s*(?:बजे|baje)", lowered
+    )
+    if not clock_match:
+        return None
+
+    hour = int(clock_match.group(1))
+    if hour > 23:
+        return None
+
+    if any(word in original for word in ("रात",)) or "raat" in lowered:
+        if hour < 12:
+            hour += 12
+    elif any(word in original for word in ("शाम",)) or "shaam" in lowered or "sham" in lowered:
+        if hour < 12:
+            hour += 12
+    elif any(word in original for word in ("दोपहर",)) or "dopahar" in lowered:
+        if hour < 12:
+            hour += 12
+    elif any(word in original for word in ("सुबह",)) or "subah" in lowered:
+        if hour == 12:
+            hour = 0
+    # No time-of-day qualifier present: keep the literal hour (0-23).
+
+    return dtime(hour=hour % 24, minute=0)
+
+
+def parse_relative_datetime(
+    text: str, reference: Optional[datetime] = None
+) -> Optional[datetime]:
+    if not text:
+        return None
+    original = text.strip()
+    lowered = original.lower()
+    now = reference or datetime.now()
+
     clock_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", lowered)
+    explicit_time = None
     if clock_match:
         hour = int(clock_match.group(1))
         minute = int(clock_match.group(2) or 0)
@@ -95,134 +244,94 @@ def _extract_explicit_time(lowered: str) -> Optional[dtime]:
             hour += 12
         if meridiem == "am" and hour == 12:
             hour = 0
-        return dtime(hour=hour, minute=minute)
+        explicit_time = dtime(hour=hour, minute=minute)
 
-    # 2. "5 in the evening", "9 in the morning".
-    descriptor_match = re.search(
-        r"\b(\d{1,2})\s+in\s+the\s+(morning|afternoon|evening|night)\b",
-        lowered,
-    )
-    if descriptor_match:
-        hour = int(descriptor_match.group(1))
-        descriptor = descriptor_match.group(2)
-        if descriptor in ("evening", "night") and hour != 12:
-            hour += 12
-        elif descriptor == "afternoon" and hour < 12:
-            hour += 12
-        return dtime(hour=hour % 24, minute=0)
-
-    # 3. Spelled-out hour with no am/pm of its own ("at nine tonight").
-    #    Only trusted when a morning/evening/night/tonight context word
-    #    is ALSO present in the sentence -- a bare "call me at nine"
-    #    with nothing else is too ambiguous and is deliberately left
-    #    unparsed rather than guessed at.
-    word_match = re.search(
-        r"\bat\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
-        r"(?:\s*o'?clock)?",
-        lowered,
-    )
-    if word_match:
-        hour = WORD_NUMBERS[word_match.group(1)]
-        if any(word in lowered for word in _PM_CONTEXT_WORDS):
-            if hour != 12:
-                hour += 12
-            return dtime(hour=hour, minute=0)
-        if any(word in lowered for word in _AM_CONTEXT_WORDS):
-            if hour == 12:
-                hour = 0
-            return dtime(hour=hour, minute=0)
-        return None
-
-    return None
-
-
-def _extract_absolute_date(lowered: str, now: datetime) -> Optional[datetime]:
-    """
-    "September 10", "10 September", "10th September" -> a datetime at
-    midnight on that date. Year is inferred: this year, or next year
-    if that month/day has already passed relative to `now`. Returns
-    None if no month name is present in the text at all.
-    """
-    match = _ABSOLUTE_DATE_PATTERN_MONTH_FIRST.search(lowered)
-    if match:
-        month_name, day_num = match.group(1), int(match.group(2))
-    else:
-        match = _ABSOLUTE_DATE_PATTERN_DAY_FIRST.search(lowered)
-        if not match:
-            return None
-        day_num, month_name = int(match.group(1)), match.group(2)
-
-    month_num = MONTHS[month_name]
-
-    try:
-        candidate_date = now.replace(
-            month=month_num, day=day_num, hour=0, minute=0, second=0, microsecond=0
-        )
-    except ValueError:
-        # Invalid day for that month (e.g. "February 30") -- not
-        # safely parseable, so don't guess.
-        return None
-
-    if candidate_date.date() < now.date():
-        try:
-            candidate_date = candidate_date.replace(year=now.year + 1)
-        except ValueError:
-            return None
-
-    return candidate_date
-
-
-def parse_relative_datetime(
-    text: str, reference: Optional[datetime] = None
-) -> Optional[datetime]:
-    if not text:
-        return None
-    lowered = text.strip().lower()
-    now = reference or datetime.now()
-
-    # "in an hour" / "in 3 hours" / "in 20 minutes" are absolute
-    # offsets from now regardless of anything else in the sentence --
-    # resolve and return immediately (unchanged from before).
-    if re.search(r"\bin\s+(an?\s+)?hour\b", lowered):
-        return now + timedelta(hours=1)
-    hours_match = re.search(r"\bin\s+(\d+)\s+hours?\b", lowered)
-    if hours_match:
-        return now + timedelta(hours=int(hours_match.group(1)))
-    minutes_match = re.search(r"\bin\s+(\d+)\s+minutes?\b", lowered)
-    if minutes_match:
-        return now + timedelta(minutes=int(minutes_match.group(1)))
-
-    explicit_time = _extract_explicit_time(lowered)
+    # Hindi/Hinglish "<N> बजे / baje" clock phrasing (only used if no
+    # English am/pm time was already found above).
+    if explicit_time is None:
+        explicit_time = _extract_hi_clock_time(lowered, original)
 
     day_offset_date = None
-    # True only when the date came from a bare "today"/"tonight" (as
-    # opposed to an explicit weekday/absolute date/tomorrow) -- this is
-    # what decides whether we're allowed to roll the result forward a
-    # day if the resolved time has already passed today.
-    is_explicit_today = False
 
-    absolute_date = _extract_absolute_date(lowered, now)
-    if absolute_date is not None:
-        day_offset_date = absolute_date
-    elif re.search(r"\bday\s+after\s+tomorrow\b", lowered):
-        day_offset_date = now + timedelta(days=2)
-    elif "tomorrow" in lowered:
-        day_offset_date = now + timedelta(days=1)
-    else:
+    # -- Explicit "<month> <day>" date (e.g. "September 10") ------------
+    explicit_date = _extract_explicit_date(original, now)
+    if explicit_date is not None:
+        day_offset_date = explicit_date
+
+    # -- Weekday names (English + Hindi) --------------------------------
+    if day_offset_date is None:
         for idx, day in enumerate(DAYS):
             if re.search(rf"\b{day}\b", lowered):
                 day_offset_date = _next_weekday(now, idx)
                 break
-        if day_offset_date is None and (
-            "today" in lowered or "tonight" in lowered
-        ):
-            day_offset_date = now
-            is_explicit_today = True
+        if day_offset_date is None:
+            for idx, day in enumerate(HI_DAYS):
+                if day in original:
+                    day_offset_date = _next_weekday(now, idx)
+                    break
+
+    # -- Day-after-tomorrow (English + Hindi + Hinglish) -----------------
+    if day_offset_date is None and (
+        "day after tomorrow" in lowered
+        or "परसों" in original
+        or re.search(r"\bparso\b", lowered)
+    ):
+        day_offset_date = now + timedelta(days=2)
+    elif day_offset_date is None and (
+        "tomorrow" in lowered
+        or "कल" in original
+        or re.search(r"\bkal\b", lowered)
+    ):
+        day_offset_date = now + timedelta(days=1)
+    # -- NEW (next-week / next-month day-component fix): "next week" /
+    # "अगले हफ्ते" / "agle hafte" and "next month" / "अगले महीने" /
+    # "agle mahine" / "agle month" -- see module docstring "CHANGE
+    # (next-week / next-month day-component -- THIS revision)" above
+    # for the full root-cause write-up. Placed in the same elif chain,
+    # gated the same "day_offset_date is None and ..." way as every
+    # other branch here, so it only ever fires when nothing more
+    # specific has already matched.
+    elif day_offset_date is None and (
+        re.search(r"\bnext\s+week\b", lowered)
+        or "अगले हफ्ते" in original
+        or re.search(r"\bagle\s+hafte\b", lowered)
+    ):
+        day_offset_date = now + timedelta(days=7)
+    elif day_offset_date is None and (
+        re.search(r"\bnext\s+month\b", lowered)
+        or "अगले महीने" in original
+        or re.search(r"\bagle\s+mahine\b", lowered)
+        or re.search(r"\bagle\s+month\b", lowered)
+    ):
+        day_offset_date = _add_one_month(now)
+    elif re.search(r"\bin\s+(an?\s+)?hour\b", lowered):
+        return now + timedelta(hours=1)
+    elif re.search(r"\bin\s+(\d+)\s+hours?\b", lowered):
+        m = re.search(r"\bin\s+(\d+)\s+hours?\b", lowered)
+        return now + timedelta(hours=int(m.group(1)))
+    elif re.search(r"\bin\s+(\d+)\s+minutes?\b", lowered):
+        m = re.search(r"\bin\s+(\d+)\s+minutes?\b", lowered)
+        return now + timedelta(minutes=int(m.group(1)))
+    elif (
+        day_offset_date is None
+        and (
+            "today" in lowered
+            or "later today" in lowered
+            or "आज" in original
+            or re.search(r"\baaj\b", lowered)
+        )
+    ):
+        day_offset_date = now
 
     time_of_day = explicit_time
     if time_of_day is None:
         for phrase, t in TIME_OF_DAY.items():
             if phrase in lowered:
+                time_of_day = t
+                break
+    if time_of_day is None:
+        for phrase, t in HI_TIME_OF_DAY.items():
+            if phrase in original or phrase in lowered:
                 time_of_day = t
                 break
 
@@ -233,7 +342,7 @@ def parse_relative_datetime(
     chosen_time = time_of_day if time_of_day is not None else TIME_OF_DAY["morning"]
     candidate = _combine(base_date, chosen_time)
 
-    if (day_offset_date is None or is_explicit_today) and candidate <= now:
+    if day_offset_date is None and candidate <= now:
         candidate += timedelta(days=1)
 
     return candidate

@@ -177,8 +177,8 @@ class Settings(BaseSettings):
     # Submission assets
     # ------------------------------------------------------------------
 
-    resume_path: str = "assets/resume.pdf"
-    architecture_image_path: str = "assets/architecture.png"
+    resume_path: str = "assets/Akshansh_Tyagi_AI_ML_Engineer_Resume.pdf"
+    architecture_image_path: str = "assets/ai_voice_sales_agent_architecture_image.png"
 
     # Twilio's WhatsApp media API requires publicly reachable HTTPS
     # URLs -- it cannot fetch files from local disk. Host resume_path /
